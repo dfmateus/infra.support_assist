@@ -1,0 +1,56 @@
+# roles/sos_report/tasks/0-determine_mode.yml
+---
+# 1. Attempt STAT check if the host is assumed to be RHEL standard (SSH accessible).
+# We assume any host not explicitly listed in the 'ocp_nodes' group is SSH-accessible.
+- name: "0-determine-mode: Check OCP evidence via STAT (RHEL standard host)"
+  when: inventory_hostname not in groups['ocp_nodes']
+  ansible.builtin.stat:
+    path: /etc/kubernetes/kubelet.conf
+  register: __kubelet_config_status
+  ignore_errors: true # Ignore if the host is unreachable for RHEL or the file doesn't exist
+
+# 2. Attempts STAT check via OC DEBUG if it's an OCP node
+- name: "0-determine-mode: Check OCP evidence via OC DEBUG (Inaccessible OCP node)"
+  when:
+    - inventory_hostname in groups['ocp_nodes']
+    - __ocp_delegation_host is defined
+  delegate_to: "{{ __ocp_delegation_host }}"
+  register: __kubelet_oc_debug_status
+  ansible.builtin.shell: >
+    {{ sos_report_oc_cli_path | default('') }}oc debug node/{{ inventory_hostname }} -- stat /host/etc/kubernetes/kubelet.conf
+  changed_when: false
+  failed_when: false
+
+- name: "0-determine-mode: Set fact 'is_ocp_node'"
+  ansible.builtin.set_fact:
+    is_ocp_node: >-
+      {{
+        (inventory_hostname in groups['ocp_nodes'])
+        or
+        (__kubelet_config_status.stat.exists | default(false))
+        or
+        (__kubelet_oc_debug_status.rc == 0)
+      }}
+    cacheable: true
+
+# 4. Determine the final mode.
+- name: "0-determine-mode: Determine SOS Report Mode (ocp_node or rhel_standard)"
+  when: sos_report_mode is not defined or sos_report_mode == 'auto'
+  ansible.builtin.set_fact:
+    sos_report_mode: "{{ 'ocp_node' if is_ocp_node else 'rhel_standard' }}"
+    cacheable: true
+
+- name: "0-determine-mode: Debug determined SOS Report mode"
+  ansible.builtin.debug:
+    msg: "Host {{ inventory_hostname }} determined report mode: {{ sos_report_mode }}"
+
+- name: "0-determine-mode: Fail if sos_report_mode is invalid"
+  when: sos_report_mode not in ['ocp_node', 'rhel_standard']
+  ansible.builtin.fail:
+    msg: >
+      [ERROR] Invalid sos_report_mode '{{ sos_report_mode }}' for host '{{ inventory_hostname }}'.
+      Must be 'ocp_node', 'rhel_standard', or 'auto'.
+
+- name: "0-determine-mode: Stop Execution - meta end_play (Debug Purpose Only)"
+  ansible.builtin.meta: end_play
+...

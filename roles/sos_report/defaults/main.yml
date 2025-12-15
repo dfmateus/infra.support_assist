@@ -1,9 +1,61 @@
+# defaults/main.yml (ADAPTED)
 ---
+# --- GENERAL REPORT SETTINGS ---
+
 # The destination directory on the Ansible control node to store the reports.
-# The `fetch` module will create a subdirectory for each case/host.
+# The 'fetch' module will create a subdirectory for each case/host.
 sos_report_dest: "/tmp/sos_reports"
 
+# If true, the role attempts to clean up the generated sosreport files
+# from the remote target node(s) after fetching/uploading.
+sos_report_cleanup: "{{ clean | default(true) | bool }}"
+
+# --- RHEL STANDARD MODE SETTINGS ---
+
+# Flag used to enable the containerized AAP sosreport plugin when running on a RHEL target host.
 sos_report_aap_containerized: "{{ containerized | default(false) | bool }}"
 
-sos_report_cleanup: "{{ clean | default(true) | bool }}"
+# --- OCP MODE SETTINGS (NEW) ---
+
+# Control the execution mode:
+# 'rhel_standard' (default): Runs sos report directly on the target host via SSH/become.
+# 'ocp_node': Runs sos report on the target node via 'oc debug node/<node_name>' from the control node.
+sos_report_mode: 'rhel_standard'
+
+# Required token for connecting to the OCP API server from the control node (Bastion/Jump).
+# This token must have permissions to run 'oc debug node/<node_name>'.
+# This is mandatory if sos_report_mode is 'ocp_node'.
+sos_report_ocp_token: ''
+
+# OCP API Server URL (e.g., https://api.mycluster.example.com:6443).
+# Required if using sos_report_mode: 'ocp_node'.
+sos_report_ocp_api_url: ''
+
+# Optional: Directory path on the control node where the 'oc' executable is located, if not in PATH.
+# Example: /usr/local/bin/ or leave blank if 'oc' is in the system PATH.
+sos_report_oc_cli_path: ''
+
+# Optional: If the 'oc debug' method fails and a fallback to SSH is needed (future feature),
+# specify the path to the SSH private key (assuming user 'core').
+sos_report_ocp_ssh_key_path: ''
+
+# Optional: Skip TLS verification when connecting to the OCP API server. (Used with 'oc login')
+sos_report_insecure_skip_tls_verify: false
+
+# 1. Base command (must be kept short)
+ocp_cmd_base: >
+  {{ sos_report_oc_cli_path | default('') }}oc debug node/{{ inventory_hostname }} -- /bin/sh -c "
+
+# 2. Inner shell setup (bash -c)
+ocp_shell_setup: >
+  chroot /host /bin/bash -c 'set -o pipefail; printf \"\\n{% if case_id is defined %}{{ case_id }}{% endif %}\\n\" |
+
+# 3. sos report command start
+ocp_sos_start: >
+  /usr/bin/toolbox sos report {{ __ocp_sos_cmd_params }}
+
+# 4. Final command (concatenation)
+# Ensures all parts are joined together without extra spaces,
+# preserving the single-line command structure required for execution.
+ocp_sos_command_template: "{{ ocp_cmd_base }}{{ ocp_shell_setup }}{{ ocp_sos_start }}--label={{ inventory_hostname | lower }}'\""
 ...

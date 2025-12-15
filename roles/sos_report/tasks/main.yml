@@ -1,17 +1,33 @@
 ---
-- name: Install
-  ansible.builtin.include_tasks: install.yml
-
-- name: Block
+# --- 1. SOS REPORT EXECUTION BLOCK FOR STANDARD RHEL HOST ---
+- name: "BLOCK: Run SOS Report for Standard RHEL Host"
+  when: sos_report_mode == 'rhel_standard'
   block:
-    - name: Generate
-      ansible.builtin.include_tasks: generate.yml
+    - name: "1-install_rhel: Install SOS package"
+      ansible.builtin.include_tasks: 1-install_rhel.yml
+    - name: "2-generate_rhel: Generate SOS Report on RHEL Host"
+      ansible.builtin.include_tasks: 2-generate_rhel.yml
 
-    - name: Fetch
-      ansible.builtin.include_tasks: fetch.yml
+    - name: "3-fetch_rhel: Fetch SOS Report from RHEL Host"
+      ansible.builtin.include_tasks: 3-fetch_rhel.yml
 
-  always:
-    - name: Cleanup
-      when: sos_report_cleanup | bool
-      ansible.builtin.include_tasks: cleanup.yml
+# --- 2. SOS REPORT EXECUTION BLOCK FOR OCP NODE ---
+- name: "BLOCK: Run SOS Report for OpenShift Node"
+  when: sos_report_mode == 'ocp_node'
+  block:
+    - name: "1-install_ocp: Check OC CLI and Authenticate"
+      ansible.builtin.debug:
+        msg: "Starting OCP Node SOS Report via OC Debug."
+      delegate_to: localhost
+
+    - name: "2-generate_ocp: Generate SOS Report via oc debug"
+      ansible.builtin.include_tasks: 2-generate_ocp.yml
+
+    - name: "3-fetch_ocp: Copy SOS Report from Node via oc debug"
+      ansible.builtin.include_tasks: 3-fetch_ocp.yml
+
+# --- 3. CLEANUP BLOCK ---
+- name: "4-cleanup: Cleanup local and remote SOS Reports"
+  when: sos_report_cleanup | bool
+  ansible.builtin.include_tasks: 4-cleanup.yml
 ...

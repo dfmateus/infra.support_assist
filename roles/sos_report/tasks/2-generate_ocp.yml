@@ -1,0 +1,84 @@
+# tasks/2-generate_ocp.yml
+---
+# NOTE: This workflow delegates execution to the OCP Bastion host.
+# The 'delegate_to' variable (__ocp_delegation_host) must be set in the main playbook.
+
+- name: "2-generate-ocp: Ensure OC CLI is logged in (via Bastion)"
+  delegate_to: "{{ __ocp_delegation_host }}"
+  register: __oc_login_output
+  ansible.builtin.command: >
+    {{ sos_report_oc_cli_path | default('') }}oc login
+    --token={{ sos_report_ocp_token }}
+    --server={{ sos_report_ocp_api_url }}
+    --insecure-skip-tls-verify={{ sos_report_insecure_skip_tls_verify | default(false) }}
+  changed_when: false
+  # Handles successful login when already logged in (RC != 0 but harmless)
+  failed_when:
+    - sos_report_ocp_token == '' or sos_report_ocp_api_url == ''
+    - __oc_login_output.rc != 0 and 'Already logged in' not in __oc_login_output.stderr
+
+- name: "2-generate-ocp: Find exact OCP Node Name using FQDN filter"
+  delegate_to: "{{ __ocp_delegation_host }}"
+  register: __ocp_node_name_lookup
+  changed_when: false
+  failed_when: __ocp_node_name_lookup.stdout | trim == ""
+  ansible.builtin.shell: |
+    set -o pipefail
+    {{ sos_report_oc_cli_path | default('') }}oc get nodes -o jsonpath="{.items[*].metadata.name}" \
+    | tr ' ' '\n' \
+    | grep -w {{ inventory_hostname | split('.') | first }} \
+    | head -n 1
+
+- name: "2-generate-ocp: Set exact OCP Node Name for oc debug"
+  ansible.builtin.set_fact:
+    __ocp_delegation_node_name: "{{ __ocp_node_name_lookup.stdout | trim }}"
+
+- name: "2-generate-ocp: Display OCP Node Name resolved"
+  delegate_to: "{{ __ocp_delegation_host }}"
+  ansible.builtin.debug:
+    msg: "OCP Node Name for inventory host '{{ inventory_hostname }}' is '{{ __ocp_delegation_node_name }}'"
+
+- name: "2-generate-ocp: The OCP Node chosen for SOS Report is '{{ __ocp_delegation_node_name }}'"
+  delegate_to: "{{ __ocp_delegation_host }}"
+  ansible.builtin.debug:
+    msg: "OCP Node '{{ __ocp_delegation_node_name }}' via 'oc debug' from Bastion."
+
+# - name: "2-generate-ocp: Stop Execution - end_play (Debug Purpose Only)"
+#   ansible.builtin.meta: end_play
+
+- name: "2-generate-ocp: Set SOS command parameters (Final Clean String)"
+  ansible.builtin.set_fact:
+    __ocp_sos_cmd_params: >
+      --only-plugins=openshift,openshift_ovn,openvswitch,podman,crio,system,networking
+      --all-logs
+      --plugin-timeout=600
+      --batch
+      {% if case_id is defined %}
+      --name={{ case_id }}
+      {% endif %}
+
+- name: "2-generate-ocp: Generate SOS Report on OCP Node (Asynchronous Run, Direct Command)"
+  delegate_to: "{{ __ocp_delegation_host }}"
+  register: __sos_report_output_ocp
+  changed_when: __sos_report_output_ocp.rc == 0
+  async: 1800
+  poll: 10
+  ansible.builtin.shell: |
+    set -o pipefail
+    {{ sos_report_oc_cli_path | default('') }}oc debug node/{{ __ocp_delegation_node_name }} -- /bin/sh -c "
+    chroot /host /bin/bash -c 'set -o pipefail;
+    /usr/bin/toolbox sos report {{ __ocp_sos_cmd_params }}'
+    "
+
+- name: "2-generate-ocp: Set SOS Report location variable (OCP)"
+  # Use regex to find the file path saved in /host/var/tmp/
+  ansible.builtin.set_fact:
+    sos_report_location: "{{ __sos_report_output_ocp.stdout | regex_search('/host/var/tmp/sosreport-.*\\.tar\\.xz') }}"
+
+- name: "2-generate-ocp: View sosreport location on remote nodes"
+  ansible.builtin.debug:
+    msg: "OCP Node SOS Report located at: {{ sos_report_location }}"
+
+# - name: "2-generate-ocp: Stop execution - end_play"
+#   ansible.builtin.meta: end_play
+...

@@ -1,0 +1,68 @@
+---
+# Define the paths and essential variables required for the fetch operation.
+- name: "3-fetch-ocp: Define variables for fetching"
+  ansible.builtin.set_fact:
+    __bastion_dest_path: "/tmp/sos_reports_bastion/{{ inventory_hostname | lower | regex_replace('[^a-zA-Z0-9_-]', '-') }}"
+    __local_dest_path: "{{ sos_report_dest }}/{{ inventory_hostname | lower | regex_replace('[^a-zA-Z0-9_-]', '-') }}"
+    __inventory_hostname_short: "{{ inventory_hostname | split('.') | first }}"
+    __sos_filename: "{{ sos_report_location | basename }}"
+
+- name: "3-fetch-ocp: Case folder block (OCP)"
+  when: sos_report_location is defined and sos_report_location | length > 0
+  block:
+    # --- STEP 1: Copy from OCP Node to Bastion Host ---
+
+    - name: "3-fetch-ocp: Ensure temporary destination folder exists on Bastion"
+      delegate_to: "{{ __ocp_delegation_host }}"
+      ansible.builtin.file:
+        path: "{{ __bastion_dest_path }}"
+        state: directory
+        mode: '0755'
+
+    - name: "3-fetch-ocp: Copy SOS Report from OCP Node to Bastion Host via 'oc debug -- cat'"
+      delegate_to: "{{ __ocp_delegation_host }}"
+      register: __copy_to_bastion
+      changed_when: true
+      # Uses the discovered node name or falls back to the short name for OC CLI access.
+      ansible.builtin.shell: |
+        set -o pipefail
+        {{ sos_report_oc_cli_path | default('') }}oc debug node/{{ __ocp_delegation_node_name | default(__inventory_hostname_short) }} \
+        -- cat {{ sos_report_location }} > {{ __bastion_dest_path }}/{{ __sos_filename }}
+
+    # --- STEP 2: Fetch from Bastion Host to Ansible Control Node (Local) ---
+
+    - name: "3-fetch-ocp: Ensure local destination folder exists on Ansible Control Node"
+      delegate_to: localhost
+      ansible.builtin.file:
+        path: "{{ __local_dest_path }}"
+        state: directory
+        mode: '0755'
+
+    - name: "3-fetch-ocp: Fetch SOS Report from Bastion to Control Node"
+      delegate_to: "{{ __ocp_delegation_host }}"
+      register: __fetch_from_bastion
+      ansible.builtin.fetch:
+        src: "{{ __bastion_dest_path }}/{{ __sos_filename }}"
+        dest: "{{ __local_dest_path }}/"
+        flat: true # Keep the basename only
+
+    # --- STEP 3: Finalization and Cleanup ---
+
+    - name: "3-fetch-ocp: Build case_updates_needed variable (OCP)"
+      delegate_to: localhost
+      ansible.builtin.set_fact:
+        case_updates_needed: >-
+          {{ case_updates_needed | default([]) +
+          [{
+            'attachment': __local_dest_path ~ '/' ~ __sos_filename,
+            'attachmentDescription': (
+              "OCP SOS Report from '" ~ inventory_hostname
+              ~ "' gathered via 'oc debug' (OCP -> Bastion -> Local)."
+            )
+          }] }}
+
+    - name: "3-fetch-ocp: Display copied SOS Report path"
+      delegate_to: localhost
+      ansible.builtin.debug:
+        msg: "Copied OCP Node SOS Report to: {{ __local_dest_path }}/{{ __sos_filename }}"
+...

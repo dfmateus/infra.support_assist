@@ -1,0 +1,103 @@
+# gather_and_upload_sos.yml
+---
+- name: Gather SOS Report(s) and Upload to Red Hat Support Case
+  hosts: all
+  gather_facts: false
+
+  # Global variables to be passed via -e:
+  # -e case_id=01234567 OR -e case_summary="New issue..."
+  # -e upload=true/false (default true)
+  # -e clean=true/false (default true)
+  # NOTE: sos_report_mode is now determined automatically by 0-determine_mode.yml
+
+  tasks:
+    # --- BLOCK 0.1: SET DELEGATION VARIABLE ---
+    - name: "0.1 SET BASTION: Define Execution Host for OCP Workflow"
+      when: groups['ocp_bastion'] is defined and inventory_hostname in groups['ocp_nodes']
+      delegate_to: localhost
+      run_once: true
+      ansible.builtin.set_fact:
+        __ocp_delegation_host: "{{ groups['ocp_bastion'][0] }}"
+        cacheable: true
+
+    # --- BLOCK 0.2: DETERMINE MODE ---
+    - name: "0.2 DETERMINE MODE: Set report mode (OCP or RHEL)"
+      ansible.builtin.include_role:
+        name: sos_report
+        tasks_from: "0-determine_mode.yml"
+
+    # --- 2. PRE-FLIGHT VALIDATION BLOCK ---
+    - name: "Block | Role Validation(s)"
+      when: upload | default(true) | bool
+      delegate_to: localhost
+      run_once: true
+      block:
+
+        - name: "VALIDATION: Check Red Hat API Token Status"
+          ansible.builtin.include_role:
+            name: rh_token_refresh
+            tasks_from: 1-pre_validation.yml
+
+        - name: "VALIDATION: Check Case ID/Mandatory Creation Variables"
+          ansible.builtin.include_role:
+            name: rh_case
+            tasks_from: 1-pre_validation.yml
+
+    # --- 3. SOS REPORT GATHER BLOCK ---
+    - name: "Block | Gather SOS Report(s)"
+      block:
+        - name: "RUN: Gather SOS Report(s) (RHEL or OCP Mode)"
+          ansible.builtin.include_role:
+            name: sos_report
+
+      rescue:
+        - name: "Rescue | SOS Report(s) failed"
+          ansible.builtin.fail:
+            msg: >
+              [ERROR] SOS Report(s) execution failed during collection or archiving.
+              Stopping pipeline immediately; check the logs above for details.
+
+    # --- 4. UPLOAD BLOCK (RUN ONCE) ---
+    - name: Upload Block
+      delegate_to: localhost
+      run_once: true
+      when:
+        - upload | default(true) | bool
+      block:
+
+        - name: Aggregate 'case_updates_needed' data from all hosts
+          ansible.builtin.set_fact:
+            case_updates_needed: |
+              {% set combined_list = [] %}
+              {% for host in ansible_play_hosts %}
+              {%   if hostvars[host].case_updates_needed is defined %}
+              {%     set _ = combined_list.extend(hostvars[host].case_updates_needed) %}
+              {%   endif %}
+              {% endfor %}
+              {{ combined_list }}
+
+        - name: "Block | Refresh Red Hat API Token"
+          block:
+            - name: Call rh_token_refresh role
+              ansible.builtin.include_role:
+                name: rh_token_refresh
+          rescue:
+            - name: "Rescue | Token Refresh failed"
+              ansible.builtin.fail:
+                msg: >
+                  [ERROR] Oh, No! => Refresh Red Hat API token failed.
+                  Stopping pipeline immediately, check the logs above for details.
+
+        - name: "Block | Create/Update Red Hat Support Case"
+          block:
+            - name: Call rh_case role (Automatically detects create/update/hybrid mode)
+              ansible.builtin.include_role:
+                name: rh_case
+          rescue:
+            - name: "Rescue | Case Creation/Update failed"
+              ansible.builtin.fail:
+                msg: >
+                  [ERROR] Oh, No! => Case creation/update failed.
+                  Stopping pipeline immediately, check the logs above for details.
+                  Check the API response for invalid subscription or product/version mismatch.
+...

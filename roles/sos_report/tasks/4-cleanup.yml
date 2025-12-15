@@ -1,0 +1,42 @@
+# tasks/4-cleanup.yml
+---
+# --- Clean Target RHEL Node ---
+- name: "4-cleanup: Cleanup Target RHEL Node SOS Reports"
+  when: sos_report_mode == 'rhel_standard'
+  block:
+    - name: "4-cleanup: Check for old SOS Reports on RHEL Node"
+      ansible.builtin.find:
+        paths: /var/tmp
+        patterns: sosreport-*.tar.*
+      register: sos_reports
+
+    - name: "4-cleanup: Delete old SOS Reports on RHEL Node"
+      loop: "{{ sos_reports.files }}"
+      loop_control:
+        label: "{{ item.path | basename }}"
+      become: true
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: absent
+
+# --- Clean Target OCP Node ---
+- name: "4-cleanup: Block for OCP Node Cleanup"
+  when: sos_report_mode == 'ocp_node' and sos_report_location is defined and sos_report_location | length > 0
+  block:
+    # The cleanup of the temporary file on the Bastion Host is moved here
+    - name: "4-cleanup: Cleanup temporary file on Bastion Host"
+      delegate_to: "{{ __ocp_delegation_host }}"
+      ansible.builtin.file:
+        path: "{{ __bastion_dest_path }}"
+        state: absent
+      changed_when: true
+
+    - name: "4-cleanup: Cleanup Target SOS Report on OCP Node via oc debug"
+      delegate_to: "{{ __ocp_delegation_host }}"
+      vars:
+        __inventory_hostname_short: "{{ inventory_hostname | split('.') | first }}"
+      ansible.builtin.command: >
+        {{ sos_report_oc_cli_path | default('') }}oc debug node/{{ __ocp_delegation_node_name | default(__inventory_hostname_short) }}
+        -- rm -f {{ sos_report_location }}
+      changed_when: true
+...
